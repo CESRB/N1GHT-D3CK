@@ -1,0 +1,117 @@
+name: Build N1GHT D3CK APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.11.1"
+          cache-provider: basic
+
+      - name: Locate or extract Android project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -f settings.gradle || -f settings.gradle.kts ]]; then
+            PROJECT_ROOT="$GITHUB_WORKSPACE"
+          else
+            ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' | head -n 1)"
+            if [[ -z "$ZIP_FILE" ]]; then
+              echo "No Android project or ZIP file was found in the repository root."
+              exit 1
+            fi
+
+            EXTRACT_DIR="$RUNNER_TEMP/nightdeck-source"
+            mkdir -p "$EXTRACT_DIR"
+            unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
+
+            SETTINGS_FILE="$(find "$EXTRACT_DIR" -type f \( -name settings.gradle -o -name settings.gradle.kts \) | head -n 1)"
+            if [[ -z "$SETTINGS_FILE" ]]; then
+              echo "No settings.gradle or settings.gradle.kts was found after extraction."
+              exit 1
+            fi
+
+            PROJECT_ROOT="$(dirname "$SETTINGS_FILE")"
+          fi
+
+          echo "root=$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
+          echo "Android project root: $PROJECT_ROOT"
+          find "$PROJECT_ROOT" -maxdepth 2 -type f | sort | head -100
+
+      - name: Show Android toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -version
+          gradle --version
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          sdkmanager --list_installed | head -120
+
+      - name: Generate official Gradle wrapper
+        working-directory: ${{ steps.project.outputs.root }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle wrapper --gradle-version 8.11.1 --distribution-type bin
+          chmod +x gradlew
+          ./gradlew --version
+
+      - name: Build debug APK
+        working-directory: ${{ steps.project.outputs.root }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon clean test lint assembleDebug --stacktrace
+
+      - name: Collect APK and checksum
+        id: artifact
+        working-directory: ${{ steps.project.outputs.root }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_FILE="$(find app/build/outputs/apk/debug -type f -name '*.apk' | head -n 1)"
+          if [[ -z "$APK_FILE" ]]; then
+            echo "Gradle completed without producing a debug APK."
+            exit 1
+          fi
+
+          OUTPUT_DIR="$GITHUB_WORKSPACE/github-build-output"
+          mkdir -p "$OUTPUT_DIR"
+          cp "$APK_FILE" "$OUTPUT_DIR/N1GHT-D3CK-0.1.0-debug.apk"
+          sha256sum "$OUTPUT_DIR/N1GHT-D3CK-0.1.0-debug.apk" | tee "$OUTPUT_DIR/N1GHT-D3CK-0.1.0-checksums.txt"
+
+          echo "apk=$OUTPUT_DIR/N1GHT-D3CK-0.1.0-debug.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: N1GHT-D3CK-0.1.0-debug
+          path: |
+            github-build-output/N1GHT-D3CK-0.1.0-debug.apk
+            github-build-output/N1GHT-D3CK-0.1.0-checksums.txt
+          if-no-files-found: error
+          retention-days: 14
